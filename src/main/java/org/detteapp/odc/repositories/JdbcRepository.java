@@ -38,12 +38,49 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
         return entityClass;
     }
 
-    protected abstract String getInsertSql();
-    protected abstract String getUpdateSql();
+    protected String getInsertSql() {
+        StringBuilder sql = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
+        StringBuilder values = new StringBuilder("VALUES (");
+
+        Field[] fields = entityClass.getDeclaredFields();
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            if (!"id".equals(field.getName())) {
+                sql.append(field.getName()).append(", ");
+                values.append("?, ");
+            }
+        }
+
+        sql.setLength(sql.length() - 2); // Remove trailing comma and space
+        values.setLength(values.length() - 2); // Remove trailing comma and space
+
+        sql.append(") ").append(values).append(")");
+
+        return sql.toString();
+    }
+
+    protected String getUpdateSql() {
+        StringBuilder sql = new StringBuilder("UPDATE ").append(tableName).append(" SET ");
+        Field[] fields = entityClass.getDeclaredFields();
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            if (!"id".equals(field.getName())) {
+                sql.append(field.getName()).append(" = ?, ");
+            }
+        }
+
+        sql.setLength(sql.length() - 2); // Remove trailing comma and space
+        sql.append(" WHERE id = ?");
+
+        return sql.toString();
+    }
 
     @Override
     public T save(T entity) {
         String sql = getInsertSql();
+
         try (PreparedStatement preparedStatement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             setParametersForSave(preparedStatement, entity);
 
@@ -54,10 +91,7 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
 
             try (ResultSet generatedKeys = preparedStatement.getGeneratedKeys()) {
                 if (generatedKeys.next()) {
-                    Field idField = entityClass.getDeclaredField("id");
-                    idField.setAccessible(true);
-                    Integer idValue = ((Number) generatedKeys.getObject(1)).intValue(); // Convert to Integer
-                    idField.set(entity, idValue);
+                    setEntityId(entity, generatedKeys);
                 }
             }
         } catch (SQLException | IllegalAccessException | NoSuchFieldException e) {
@@ -73,18 +107,15 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
 
         try (Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery(sql)) {
+
             while (resultSet.next()) {
                 T entity = entityClass.getDeclaredConstructor().newInstance();
-                for (Field field : entityClass.getDeclaredFields()) {
-                    field.setAccessible(true);
-                    field.set(entity, resultSet.getObject(field.getName()));
-                }
+                mapResultSetToEntity(resultSet, entity);
                 entities.add(entity);
             }
-        } catch (SQLException | InstantiationException | IllegalAccessException | NoSuchMethodException e) {
+        } catch (SQLException | InstantiationException | IllegalAccessException |
+                 NoSuchMethodException | InvocationTargetException e) {
             throw new RuntimeException("Error while finding all entities", e);
-        } catch (InvocationTargetException e) {
-            throw new RuntimeException(e);
         }
 
         return entities;
@@ -93,14 +124,10 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
     @Override
     public T update(T entity) {
         String sql = getUpdateSql();
-        Object idValue = null;
 
         try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
             int paramIndex = setParametersForUpdate(preparedStatement, entity);
-            Field idField = entityClass.getDeclaredField("id");
-            idField.setAccessible(true);
-            idValue = idField.get(entity);
-            preparedStatement.setObject(paramIndex, idValue);
+            setEntityIdForUpdate(preparedStatement, entity, paramIndex);
 
             int affectedRows = preparedStatement.executeUpdate();
             if (affectedRows == 0) {
@@ -115,7 +142,7 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
 
     @Override
     public T delete(int id) {
-        T entity = findById(id); // Find entity before deletion
+        T entity = findById(id);
         if (entity == null) {
             throw new RuntimeException("Entity not found");
         }
@@ -131,7 +158,7 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
             throw new RuntimeException("Error while deleting entity", e);
         }
 
-        return entity; // Return the deleted entity or handle accordingly
+        return entity;
     }
 
     @Override
@@ -140,59 +167,82 @@ public abstract class JdbcRepository<T> implements RepositoryInt<T> {
         Optional<T> foundEntity = Optional.empty();
 
         try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
-            preparedStatement.setInt(1, id);  // Passez l'ID directement dans la requête
+            preparedStatement.setInt(1, id);
 
             try (ResultSet resultSet = preparedStatement.executeQuery()) {
                 if (resultSet.next()) {
-                    // Créez une instance vide de l'entité à partir de la classe
-                    T found = entityClass.getDeclaredConstructor().newInstance();
-
-                    // Parcourir les champs de la classe pour mapper les valeurs du ResultSet
-                    for (Field field : entityClass.getDeclaredFields()) {
-                        field.setAccessible(true);  // Rendez le champ accessible
-
-                        // Récupération des valeurs du ResultSet par nom de colonne
-                        Object columnValue = resultSet.getObject(field.getName());
-
-                        // Vérifiez que la valeur extraite n'est pas nulle avant de la définir
-                        if (columnValue != null) {
-                            field.set(found, columnValue);  // Assignez la valeur au champ de l'entité
-                        }
-                    }
-
-                    foundEntity = Optional.of(found);
+                    T entity = entityClass.getDeclaredConstructor().newInstance();
+                    mapResultSetToEntity(resultSet, entity);
+                    foundEntity = Optional.of(entity);
                 }
             }
-
-        } catch (SQLException | IllegalAccessException |
-                 InstantiationException | NoSuchMethodException | InvocationTargetException e) {
+        } catch (SQLException | IllegalAccessException | InstantiationException |
+                 NoSuchMethodException | InvocationTargetException e) {
             throw new RuntimeException("Error while finding entity", e);
         }
 
         return foundEntity;
     }
 
-
-    private T findById(int id) {
-        String sql = "SELECT * FROM " + tableName + " WHERE id = ?";
-        try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
-            preparedStatement.setInt(1, id);
-            try (ResultSet resultSet = preparedStatement.executeQuery()) {
-                if (resultSet.next()) {
-                    T entity = entityClass.getDeclaredConstructor().newInstance();
-                    for (Field field : entityClass.getDeclaredFields()) {
-                        field.setAccessible(true);
-                        field.set(entity, resultSet.getObject(field.getName()));
-                    }
-                    return entity;
-                }
-            }
-        } catch (SQLException | InstantiationException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
-            throw new RuntimeException("Error while finding entity by ID", e);
-        }
-        return null;
+    private void setEntityId(T entity, ResultSet generatedKeys) throws SQLException, NoSuchFieldException, IllegalAccessException {
+        Field idField = entityClass.getDeclaredField("id");
+        idField.setAccessible(true);
+        Integer idValue = ((Number) generatedKeys.getObject(1)).intValue();
+        idField.set(entity, idValue);
     }
 
-    protected abstract void setParametersForSave(PreparedStatement preparedStatement, T entity) throws SQLException;
-    protected abstract int setParametersForUpdate(PreparedStatement preparedStatement, T entity) throws SQLException;
+    private void setEntityIdForUpdate(PreparedStatement preparedStatement, T entity, int paramIndex) throws SQLException, NoSuchFieldException, IllegalAccessException {
+        Field idField = entityClass.getDeclaredField("id");
+        idField.setAccessible(true);
+        Object idValue = idField.get(entity);
+        preparedStatement.setObject(paramIndex, idValue);
+    }
+
+    private T findById(int id) {
+        return find(id).orElse(null);
+    }
+
+    protected void setParametersForSave(PreparedStatement preparedStatement, T entity) throws SQLException {
+        Field[] fields = entityClass.getDeclaredFields();
+        int paramIndex = 1;
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            if (!"id".equals(field.getName())) {
+                try {
+                    preparedStatement.setObject(paramIndex++, field.get(entity));
+                } catch (IllegalAccessException e) {
+                    throw new RuntimeException("Error setting parameters for save", e);
+                }
+            }
+        }
+    }
+
+    protected int setParametersForUpdate(PreparedStatement preparedStatement, T entity) throws SQLException {
+        Field[] fields = entityClass.getDeclaredFields();
+        int paramIndex = 1;
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            if (!"id".equals(field.getName())) {
+                try {
+                    preparedStatement.setObject(paramIndex++, field.get(entity));
+                } catch (IllegalAccessException e) {
+                    throw new RuntimeException("Error setting parameters for update", e);
+                }
+            }
+        }
+
+        return paramIndex;
+    }
+
+    private void mapResultSetToEntity(ResultSet resultSet, T entity) throws SQLException, IllegalAccessException {
+        for (Field field : entityClass.getDeclaredFields()) {
+            field.setAccessible(true);
+            Object value = resultSet.getObject(field.getName());
+            if (value != null) {
+                field.set(entity, value);
+            }
+        }
+    }
 }

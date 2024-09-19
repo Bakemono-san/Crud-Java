@@ -14,32 +14,7 @@ public class DetteRepositoryJdbc extends JdbcRepository<DetteEntity> implements 
     public DetteRepositoryJdbc(DatabaseConfig databaseConfig) {
         super(databaseConfig, "Dettes", DetteEntity.class);
     }
-
-    @Override
-    protected String getInsertSql() {
-        return "INSERT INTO " + getTableName() + " (montant, clientId) VALUES (?, ?)";
-
-    }
-
-    @Override
-    protected String getUpdateSql() {
-        return "UPDATE " + getTableName() + " SET montant = ?, clientId = ? WHERE id = ?";
-    }
-
-    @Override
-    protected void setParametersForSave(PreparedStatement preparedStatement, DetteEntity entity) throws SQLException {
-        preparedStatement.setFloat(1,entity.getMontant());
-        preparedStatement.setInt(2,entity.getClientId());
-    }
-
-    @Override
-    protected int setParametersForUpdate(PreparedStatement preparedStatement, DetteEntity entity) throws SQLException {
-        int paramIndex = 1;
-        preparedStatement.setFloat(paramIndex++, entity.getMontant());
-        preparedStatement.setInt(paramIndex++, entity.getClientId());
-        return paramIndex;
-    }
-
+    
     @Override
     public Optional<DetteEntity> findByClient(int id) {
         return Optional.empty();

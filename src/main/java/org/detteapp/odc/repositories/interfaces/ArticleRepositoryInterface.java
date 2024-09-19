@@ -6,6 +6,6 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public interface ArticleRepositoryInterface extends RepositoryInt<ArticleEntity> {
-    public Optional<ArticleEntity> findByLibelle(String title);
+    Optional<ArticleEntity> findByLibelle(String title);
 
 }
